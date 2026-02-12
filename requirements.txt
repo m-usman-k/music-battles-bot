@@ -1,0 +1,8 @@
+discord.py
+python-dotenv
+stripe
+paypalrestsdk
+aiosqlite
+fastapi
+uvicorn
+aiohttp

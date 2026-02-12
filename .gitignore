@@ -1,0 +1,9 @@
+# Files
+*.db
+*.env
+
+# Folders
+__pycache__
+venv
+*/__pycache__
+*/venv
