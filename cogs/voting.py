@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands, tasks
+from discord import app_commands
 from utils.database import get_db
 from utils.constants import VOTING_DURATION_HOURS, PLATFORM_FEE_PERCENT, WINNER_PAYOUT_PERCENT, COLOR_SUCCESS, COLOR_ERROR, COLOR_INFO, VOTER_ROLE_NAME
 from datetime import datetime, timedelta
@@ -85,19 +86,21 @@ class Voting(commands.Cog):
             if results_channel:
                 await results_channel.send(embed=embed)
 
-    @commands.command(name="vote")
-    async def vote(self, ctx, entrant_num: int):
-        """Vote for an entrant in the current voting channel."""
-        if len(ctx.author.roles) <= 1:
-            embed = discord.Embed(
-                title="Access Denied", 
-                description="Only members with a role are allowed to vote.", 
-                color=COLOR_ERROR
-            )
-            return await ctx.send(embed=embed)
+    @app_commands.command(name="vote")
+    async def vote(self, interaction: discord.Interaction, entrant_num: int):
+        """Vote for an entrant in a battle. Use in the voting channel."""
+        if not interaction.channel.name.startswith("battle-") or not interaction.channel.name.endswith("-voting"):
+            embed = discord.Embed(title="Error", description="You can only vote in dedicated voting channels.", color=COLOR_ERROR)
+            return await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        try:
+            battle_id = int(interaction.channel.name.split("-")[1])
+        except:
+            embed = discord.Embed(title="Error", description="Invalid channel format.", color=COLOR_ERROR)
+            return await interaction.response.send_message(embed=embed, ephemeral=True)
 
         async with get_db() as db:
-            cursor = await db.execute("SELECT battle_id FROM battles WHERE voting_channel_id = ? AND status = 'voting'", (ctx.channel.id,))
+            cursor = await db.execute("SELECT battle_id FROM battles WHERE voting_channel_id = ? AND status = 'voting'", (interaction.channel.id,))
             row = await cursor.fetchone()
             if not row:
                 embed = discord.Embed(title="Error", description="This is not an active voting channel.", color=COLOR_ERROR)

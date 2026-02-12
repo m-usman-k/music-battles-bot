@@ -1,25 +1,26 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 from utils.constants import COLOR_INFO
 
 class HelpCommand(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="help")
-    async def help(self, ctx):
-        """Displays the help message with coin system details."""
+    @app_commands.command(name="help")
+    async def help_command(self, interaction: discord.Interaction):
+        """Displays all available commands and their usage."""
         embed = discord.Embed(
-            title="Music Battles Bot - Help",
-            description="Participate in music battles by topping up your coins.",
+            title="Music Battle Bot - Help",
+            description="Welcome to the Music Battle Bot! Here are the available commands:",
             color=COLOR_INFO
         )
 
         embed.add_field(
             name="Coin Commands",
             value=(
-                "`!buy_coins <amount>` - Purchase coins via Stripe/PayPal ($1 = 1 Coin).\n"
-                "`!balance` - Check your current coin balance."
+                "`/buy_coins <amount>` - Purchase coins via Stripe/PayPal.\n"
+                "`/balance` - Check your coin balance."
             ),
             inline=False
         )
@@ -27,27 +28,31 @@ class HelpCommand(commands.Cog):
         embed.add_field(
             name="Battle Commands",
             value=(
-                "`!enter` - Upload music + use this command in a pool channel (costs coins).\n"
-                "`!vote <num>` - Vote for an entrant (in voting channels).\n"
-                "`!battles` - List active battles.\n"
-                "`!pool_stats` - View prize pools."
+                "`/enter <track>` - Upload music + use this command in a pool channel.\n"
+                "`/vote <num>` - Vote for an entrant (in voting channels).\n"
+                "`/battles` - List active battles.\n"
+                "`/balance` - Check your coin balance."
             ),
             inline=False
         )
         
-        if ctx.author.guild_permissions.administrator:
+        if interaction.user.guild_permissions.administrator:
             embed.add_field(
                 name="Admin Commands",
                 value=(
-                    "`!setup_server` / `!delete_setup` - Manage server structure.\n"
-                    "`!add_coins @user <amt>` - Manually give coins.\n"
-                    "`!start_battle <id>` - Move battle to voting phase.\n"
-                    "`!payouts` - View winners and amounts owed."
+                    "`/setup_server` / `/delete_setup` - Manage server.\n"
+                    "`/add_coins @user <amt>` - Manually give coins.\n"
+                    "`/balance @user` - Check another user's balance.\n"
+                    "`/start_battle <id>` - Start voting phase.\n"
+                    "`/close_pool <genre> <amt>` - Close a pool.\n"
+                    "`/disqualify @user <id>` - Remove entrant.\n"
+                    "`/payouts` - View amounts owed.\n"
+                    "`/sync` - Sync command tree."
                 ),
                 inline=False
             )
         
-        await ctx.send(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(HelpCommand(bot))

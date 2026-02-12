@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import os
 from dotenv import load_dotenv
 import asyncio
@@ -33,10 +34,46 @@ class MusicBattlesBot(commands.Bot):
                     logger.info(f'Loaded extension: {filename}')
                 except Exception as e:
                     logger.error(f'Failed to load extension {filename}: {e}')
+        
+        # Sync command tree
+        try:
+            synced = await self.tree.sync()
+            logger.info(f"Synced {len(synced)} command(s)")
+        except Exception as e:
+            logger.error(f"Failed to sync command tree: {e}")
 
     async def on_ready(self):
         logger.info(f'Logged in as {self.user.name} ({self.user.id})')
         await self.change_presence(activity=discord.Game(name="Music Battles"))
+
+    async def on_command_error(self, ctx, error):
+        from utils.constants import COLOR_ERROR
+        if isinstance(error, commands.MissingRequiredArgument):
+            embed = discord.Embed(
+                title="Missing Argument", 
+                description=f"You are missing a required argument: `{error.param.name}`\n\nUse `!help` to see correct usage.", 
+                color=COLOR_ERROR
+            )
+            await ctx.send(embed=embed)
+        elif isinstance(error, commands.CommandNotFound):
+            pass 
+        else:
+            logger.error(f'Error in command {ctx.command}: {error}')
+            embed = discord.Embed(title="Error", description="An unexpected error occurred while running the command.", color=COLOR_ERROR)
+            await ctx.send(embed=embed)
+
+    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        from utils.constants import COLOR_ERROR
+        if isinstance(error, app_commands.MissingPermissions):
+            embed = discord.Embed(title="Access Denied", description="You do not have permission to use this command.", color=COLOR_ERROR)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            logger.error(f'App Command Error: {error}')
+            embed = discord.Embed(title="Error", description="An error occurred while processing this command.", color=COLOR_ERROR)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=True)
 
 async def main():
     if not os.path.exists('./cogs'):
