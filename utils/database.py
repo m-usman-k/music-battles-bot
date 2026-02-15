@@ -35,6 +35,7 @@ async def init_db():
                 payment_status TEXT, -- 'pending', 'paid'
                 stripe_session_id TEXT,
                 paypal_order_id TEXT,
+                submission_message_id INTEGER,
                 disqualified INTEGER DEFAULT 0,
                 FOREIGN KEY (battle_id) REFERENCES battles (battle_id),
                 FOREIGN KEY (user_id) REFERENCES users (user_id)

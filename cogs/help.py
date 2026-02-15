@@ -2,6 +2,9 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from utils.constants import COLOR_INFO
+import logging
+
+logger = logging.getLogger('music_battles.help')
 
 class HelpCommand(commands.Cog):
     def __init__(self, bot):
@@ -10,6 +13,8 @@ class HelpCommand(commands.Cog):
     @app_commands.command(name="help")
     async def help_command(self, interaction: discord.Interaction):
         """Displays all available commands and their usage."""
+        # defer() is now handled globally in main.py
+        
         embed = discord.Embed(
             title="Music Battle Bot - Help",
             description="Welcome to the Music Battle Bot! Here are the available commands:",
@@ -52,7 +57,8 @@ class HelpCommand(commands.Cog):
                 inline=False
             )
         
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Ephemerality is controlled by the global deferrer in main.py
+        await interaction.followup.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(HelpCommand(bot))

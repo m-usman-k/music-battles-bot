@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 from utils.database import get_db
-from utils.constants import COLOR_SUCCESS, COLOR_ERROR, COLOR_INFO, STRIPE_API_KEY, PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_API_BASE
+from utils.constants import COLOR_SUCCESS, COLOR_ERROR, COLOR_INFO, STRIPE_API_KEY, PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_API_BASE, GENRES, POOLS
 import stripe
 import logging
 import aiohttp
@@ -28,10 +28,12 @@ class VerifyCoinPaymentView(discord.ui.View):
             embed = discord.Embed(title="Access Denied", description="This button is not for you.", color=COLOR_ERROR)
             return await interaction.response.send_message(embed=embed, ephemeral=True)
 
+        await interaction.response.defer(ephemeral=True)
         try:
             is_paid = False
             if self.method == 'stripe':
-                session = stripe.checkout.Session.retrieve(self.session_id)
+                # session = stripe.checkout.Session.retrieve(self.session_id)
+                session = await asyncio.to_thread(stripe.checkout.Session.retrieve, self.session_id)
                 is_paid = (session.payment_status == 'paid')
             else:
                 status = await self.cog._verify_paypal_order(self.session_id)
@@ -51,7 +53,7 @@ class VerifyCoinPaymentView(discord.ui.View):
 
                 button.disabled = True
                 button.label = "Verified"
-                await interaction.response.edit_message(view=self)
+                await interaction.edit_original_response(view=self)
                 
                 embed = discord.Embed(
                     title="Payment Confirmed", 
@@ -61,7 +63,7 @@ class VerifyCoinPaymentView(discord.ui.View):
                 await interaction.followup.send(embed=embed, ephemeral=True)
             else:
                 embed = discord.Embed(title="Payment Pending", description="We could not verify your payment yet. Please ensure checkout is complete.", color=COLOR_ERROR)
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+                await interaction.followup.send(embed=embed, ephemeral=True)
 
         except Exception as e:
             logger.error(f"Error verifying coin purchase: {e}")
@@ -84,9 +86,10 @@ class BuyCoinsView(discord.ui.View):
             embed = discord.Embed(title="Access Denied", description="This menu is not for you.", color=COLOR_ERROR)
             return await interaction.response.send_message(embed=embed, ephemeral=True)
             
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         try:
-            session = stripe.checkout.Session.create(
+            session = await asyncio.to_thread(
+                stripe.checkout.Session.create,
                 payment_method_types=['card'],
                 line_items=[{
                     'price_data': {
@@ -118,7 +121,7 @@ class BuyCoinsView(discord.ui.View):
             embed = discord.Embed(title="Access Denied", description="This menu is not for you.", color=COLOR_ERROR)
             return await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         try:
             order = await self.cog._create_paypal_order(self.amount_usd, f"{int(self.amount_usd)} Battle Coins")
             approve_url = next(link['href'] for link in order['links'] if link['rel'] == 'approve')
@@ -206,24 +209,34 @@ class Payments(commands.Cog):
         async with get_db() as db:
             cursor = await db.execute("SELECT genre, pool_type, total_amount, entrant_count FROM pool_totals")
             rows = await cursor.fetchall()
+            
+            # Map existing data for quick lookup
+            stats_map = {(r[0], r[1]): (r[2], r[3]) for r in rows}
+            
             embed = discord.Embed(title="Live Prize Pools", color=COLOR_INFO)
-            if not rows:
-                embed.description = "No pool data available yet."
-                return embed
-            for genre_name, pool_type, total, count in rows:
+            embed.set_footer(text="Join a pool by entering its channel and typing /enter")
+            
+            for g in GENRES:
+                category_stats = []
+                for p in POOLS:
+                    total, count = stats_map.get((g, p), (0.0, 0))
+                    status = f"**${p} Pool**: `${total:.2f}` ({count} entrants)" if count > 0 else f"**${p} Pool**: No entrants"
+                    category_stats.append(status)
+                
                 embed.add_field(
-                    name=f"{genre_name} ${pool_type} Pool",
-                    value=f"**Total Pool:** `${total:.2f}`\n**Entrants:** `{count}`\n**Winner Payout (70%):** `${total*0.7:.2f}`",
-                    inline=False
+                    name=f"--- {g} ---",
+                    value="\n".join(category_stats),
+                    inline=True
                 )
             return embed
 
     @app_commands.command(name="buy_coins")
     async def buy_coins(self, interaction: discord.Interaction, amount: int):
         """Purchase battle coins (1 Coin = $1.00)."""
+        # defer() is now handled globally in main.py
         if amount <= 0:
             embed = discord.Embed(title="Invalid Amount", description="Please specify a positive number of coins.", color=COLOR_ERROR)
-            return await interaction.response.send_message(embed=embed, ephemeral=True)
+            return await interaction.followup.send(embed=embed)
         
         async with get_db() as db:
             await db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (interaction.user.id, interaction.user.name))
@@ -241,17 +254,18 @@ class Payments(commands.Cog):
         )
         embed.set_footer(text="Payments are processed securely via Stripe or PayPal.")
         view = BuyCoinsView(interaction.user.id, float(amount), self)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(name="balance")
     async def balance(self, interaction: discord.Interaction, member: discord.Member = None):
         """Check your coin balance or another user's balance (Admins only)."""
+        # defer() is now handled globally in main.py
         target = member or interaction.user
         
         # Check permissions if checking someone else
         if member and member != interaction.user and not interaction.user.guild_permissions.administrator:
             embed = discord.Embed(title="Access Denied", description="You do not have permission to check other users' balances.", color=COLOR_ERROR)
-            return await interaction.response.send_message(embed=embed, ephemeral=True)
+            return await interaction.followup.send(embed=embed)
 
         async with get_db() as db:
             cursor = await db.execute("SELECT coins FROM users WHERE user_id = ?", (target.id,))
@@ -262,25 +276,26 @@ class Payments(commands.Cog):
         desc = f"You currently have **{coins}** Battle Coins." if target == interaction.user else f"{target.mention} currently has **{coins}** Battle Coins."
         
         embed = discord.Embed(title=title, description=desc, color=COLOR_INFO)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="add_coins")
     @app_commands.checks.has_permissions(administrator=True)
     async def add_coins(self, interaction: discord.Interaction, user: discord.Member, amount: int):
         """Admin: Manually add coins to a user."""
+        # defer() is now handled globally in main.py
         async with get_db() as db:
             await db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user.id, user.name))
             await db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (amount, user.id))
             await db.commit()
         
         embed = discord.Embed(title="Coins Added", description=f"Successfully added **{amount}** coins to {user.mention}.", color=COLOR_SUCCESS)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="payouts")
     @app_commands.checks.has_permissions(administrator=True)
     async def payouts(self, interaction: discord.Interaction):
         """Admin: View winners and amounts owed."""
-        await interaction.response.defer(ephemeral=True)
+        # defer() is now handled globally in main.py
         async with get_db() as db:
             cursor = await db.execute(
                 "SELECT u.username, b.genre, b.pool_amount, b.battle_id FROM battles b JOIN entrants e ON b.battle_id = e.battle_id JOIN users u ON e.user_id = u.user_id "
@@ -290,14 +305,14 @@ class Payments(commands.Cog):
             
             if not rows:
                 embed = discord.Embed(title="Owed Payouts", description="No pending payouts found.", color=COLOR_INFO)
-                return await interaction.followup.send(embed=embed, ephemeral=True)
+                return await interaction.followup.send(embed=embed)
                 
             embed = discord.Embed(title="Owed Payouts", color=COLOR_SUCCESS)
             for username, genre, pool, bid in rows:
                 count_cursor = await db.execute("SELECT COUNT(*) FROM entrants WHERE battle_id = ? AND payment_status = 'paid'", (bid,))
                 n = (await count_cursor.fetchone())[0]
                 embed.add_field(name=f"Battle #{bid}: {username}", value=f"**Genre:** {genre}\n**Pool:** ${pool}\n**Owed:** `${(n*pool)*0.7:.2f}`", inline=False)
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(Payments(bot))

@@ -86,56 +86,84 @@ class Voting(commands.Cog):
             if results_channel:
                 await results_channel.send(embed=embed)
 
-    @app_commands.command(name="vote")
-    async def vote(self, interaction: discord.Interaction, entrant_num: int):
-        """Vote for an entrant in a battle. Use in the voting channel."""
-        if not interaction.channel.name.startswith("battle-") or not interaction.channel.name.endswith("-voting"):
-            embed = discord.Embed(title="Error", description="You can only vote in dedicated voting channels.", color=COLOR_ERROR)
-            return await interaction.response.send_message(embed=embed, ephemeral=True)
-        
-        try:
-            battle_id = int(interaction.channel.name.split("-")[1])
-        except:
-            embed = discord.Embed(title="Error", description="Invalid channel format.", color=COLOR_ERROR)
-            return await interaction.response.send_message(embed=embed, ephemeral=True)
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        """Handle reaction-based voting."""
+        if payload.user_id == self.bot.user.id:
+            return
+
+        if str(payload.emoji) != "✅":
+            # Remove invalid reactions
+            guild = self.bot.get_guild(payload.guild_id)
+            channel = guild.get_channel(payload.channel_id)
+            if not channel: return
+            try:
+                message = await channel.fetch_message(payload.message_id)
+                user = self.bot.get_user(payload.user_id)
+                if user:
+                    await message.remove_reaction(payload.emoji, user)
+            except (discord.NotFound, discord.Forbidden):
+                pass
+            return
 
         async with get_db() as db:
-            cursor = await db.execute("SELECT battle_id FROM battles WHERE voting_channel_id = ? AND status = 'voting'", (interaction.channel.id,))
+            # Check if this message is a battle submission
+            cursor = await db.execute(
+                "SELECT entrant_id, battle_id FROM entrants WHERE submission_message_id = ?",
+                (payload.message_id,)
+            )
             row = await cursor.fetchone()
             if not row:
-                embed = discord.Embed(title="Error", description="This is not an active voting channel.", color=COLOR_ERROR)
-                return await ctx.send(embed=embed)
-            
-            battle_id = row[0]
-            
-            cursor = await db.execute("SELECT 1 FROM votes WHERE battle_id = ? AND voter_id = ?", (battle_id, ctx.author.id))
-            if await cursor.fetchone():
-                embed = discord.Embed(title="Error", description="You have already voted in this battle.", color=COLOR_ERROR)
-                return await ctx.send(embed=embed)
+                return
 
+            entrant_id, battle_id = row
+
+            # Insert vote (Unique constraint battle_id, voter_id handles double voting)
+            try:
+                await db.execute(
+                    "INSERT INTO votes (battle_id, voter_id, entrant_id) VALUES (?, ?, ?)",
+                    (battle_id, payload.user_id, entrant_id)
+                )
+                await db.commit()
+                logger.info(f"Recorded reaction vote from {payload.user_id} for entrant {entrant_id}")
+            except Exception as e:
+                # If they already voted elsewhere in this battle, remove the new reaction
+                guild = self.bot.get_guild(payload.guild_id)
+                channel = guild.get_channel(payload.channel_id)
+                if not channel: return
+                try:
+                    message = await channel.fetch_message(payload.message_id)
+                    user = self.bot.get_user(payload.user_id)
+                    if user:
+                        await message.remove_reaction("✅", user)
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        """Handle reaction removal to sync votes."""
+        if payload.user_id == self.bot.user.id:
+            return
+
+        if str(payload.emoji) != "✅":
+            return
+
+        async with get_db() as db:
             cursor = await db.execute(
-                "SELECT entrant_id FROM entrants WHERE battle_id = ? AND payment_status = 'paid' AND disqualified = 0 LIMIT 1 OFFSET ?",
-                (battle_id, entrant_num - 1)
+                "SELECT entrant_id FROM entrants WHERE submission_message_id = ?",
+                (payload.message_id,)
             )
-            entrant_row = await cursor.fetchone()
-            if not entrant_row:
-                embed = discord.Embed(title="Error", description="Invalid entrant number.", color=COLOR_ERROR)
-                return await ctx.send(embed=embed)
-            
-            entrant_id = entrant_row[0]
-            
+            row = await cursor.fetchone()
+            if not row:
+                return
+
+            entrant_id = row[0]
             await db.execute(
-                "INSERT INTO votes (battle_id, voter_id, entrant_id) VALUES (?, ?, ?)",
-                (battle_id, ctx.author.id, entrant_id)
+                "DELETE FROM votes WHERE entrant_id = ? AND voter_id = ?",
+                (entrant_id, payload.user_id)
             )
             await db.commit()
-            
-            embed = discord.Embed(
-                title="Vote Recorded", 
-                description=f"Your vote for entrant `{entrant_num}` has been recorded.", 
-                color=COLOR_SUCCESS
-            )
-            await ctx.send(embed=embed)
+            logger.info(f"Removed reaction vote from {payload.user_id} for entrant {entrant_id}")
 
 async def setup(bot):
     await bot.add_cog(Voting(bot))
