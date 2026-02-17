@@ -36,11 +36,20 @@ async def init_db():
                 stripe_session_id TEXT,
                 paypal_order_id TEXT,
                 submission_message_id INTEGER,
+                announcement_message_id INTEGER,
                 disqualified INTEGER DEFAULT 0,
                 FOREIGN KEY (battle_id) REFERENCES battles (battle_id),
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
+        
+        # Migration: Add announcement_message_id if it doesn't exist
+        try:
+            await db.execute("ALTER TABLE entrants ADD COLUMN announcement_message_id INTEGER")
+            await db.commit()
+        except aiosqlite.OperationalError:
+            # Column already exists
+            pass
         
         await db.execute('''
             CREATE TABLE IF NOT EXISTS votes (

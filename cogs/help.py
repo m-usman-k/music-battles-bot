@@ -33,10 +33,9 @@ class HelpCommand(commands.Cog):
         embed.add_field(
             name="Battle Commands",
             value=(
-                "`/enter <track>` - Upload music + use this command in a pool channel.\n"
-                "`/vote <num>` - Vote for an entrant (in voting channels).\n"
-                "`/battles` - List active battles.\n"
-                "`/balance` - Check your coin balance."
+                "`/enter <track>` - Join a battle (upload music as attachment).\n"
+                "`/battles` - List all currently active battles.\n"
+                "`/pools [genre]` - View prize pools (optional: filter by genre)."
             ),
             inline=False
         )
@@ -45,14 +44,15 @@ class HelpCommand(commands.Cog):
             embed.add_field(
                 name="Admin Commands",
                 value=(
-                    "`/setup_server` / `/delete_setup` - Manage server.\n"
-                    "`/add_coins @user <amt>` - Manually give coins.\n"
-                    "`/balance @user` - Check another user's balance.\n"
-                    "`/start_battle <id>` - Start voting phase.\n"
-                    "`/close_pool <genre> <amt>` - Close a pool.\n"
-                    "`/disqualify @user <id>` - Remove entrant.\n"
-                    "`/payouts` - View amounts owed.\n"
-                    "`/sync` - Sync command tree."
+                    "`/setup_server` / `/delete_setup` - Full server management.\n"
+                    "`/decide_winner <genre> <amt>` - Instantly end & pick winner.\n"
+                    "`/remove_entrant @user <genre> <amt>` - Remove & refund.\n"
+                    "`/start_battle <genre> <amt>` - Move to the voting phase.\n"
+                    "`/close_pool <genre> <amt>` - Close entries for a pool.\n"
+                    "`/disqualify @user <id>` - Remove an entrant (no refund).\n"
+                    "`/add_coins @user <amt>` - Manually credit coins.\n"
+                    "`/payouts` - View pending winner payouts.\n"
+                    "`/sync` - Sync slash commands manually."
                 ),
                 inline=False
             )

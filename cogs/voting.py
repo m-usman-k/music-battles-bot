@@ -67,7 +67,15 @@ class Voting(commands.Cog):
             fee = total_pool * PLATFORM_FEE_PERCENT
 
             await db.execute("UPDATE battles SET status = 'completed' WHERE battle_id = ?", (battle_id,))
+            
+            # Automated Payout: Credit coins to the winner's balance
+            await db.execute(
+                "UPDATE users SET coins = coins + ? WHERE user_id = ?",
+                (int(payout), winner_id)
+            )
+            
             await db.commit()
+            logger.info(f"Battle #{battle_id} completed. Winner {winner_name} credited with {int(payout)} coins.")
 
             channel = self.bot.get_channel(channel_id)
             if channel:
@@ -81,6 +89,20 @@ class Voting(commands.Cog):
                 
                 await channel.send(embed=embed)
                 await channel.set_permissions(channel.guild.default_role, send_messages=False)
+                
+                # Cleanup flow: Clear pool announcements and delete voting channel
+                battles_cog = self.bot.get_cog('Battles')
+                if battles_cog:
+                    await battles_cog.cleanup_pool_announcements(channel.guild, genre, pool_amount, battle_id)
+                
+                # Auto-delete voting channel after 1 hour (to allow people to see results)
+                # Or immediately if the user wants "instant" results and everything over
+                # Based on "create new setup and everything over", I'll set it to delete after 5 minutes
+                await asyncio.sleep(300) 
+                try:
+                    await channel.delete()
+                except:
+                    pass
 
             results_channel = discord.utils.get(channel.guild.text_channels, name="results-winners")
             if results_channel:
@@ -107,10 +129,10 @@ class Voting(commands.Cog):
             return
 
         async with get_db() as db:
-            # Check if this message is a battle submission
+            # Check if this message is a battle submission or an announcement
             cursor = await db.execute(
-                "SELECT entrant_id, battle_id FROM entrants WHERE submission_message_id = ?",
-                (payload.message_id,)
+                "SELECT entrant_id, battle_id FROM entrants WHERE submission_message_id = ? OR announcement_message_id = ?",
+                (payload.message_id, payload.message_id)
             )
             row = await cursor.fetchone()
             if not row:
@@ -150,8 +172,8 @@ class Voting(commands.Cog):
 
         async with get_db() as db:
             cursor = await db.execute(
-                "SELECT entrant_id FROM entrants WHERE submission_message_id = ?",
-                (payload.message_id,)
+                "SELECT entrant_id FROM entrants WHERE submission_message_id = ? OR announcement_message_id = ?",
+                (payload.message_id, payload.message_id)
             )
             row = await cursor.fetchone()
             if not row:

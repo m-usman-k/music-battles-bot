@@ -2,8 +2,9 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 from utils.database import get_db
-from utils.constants import COLOR_SUCCESS, COLOR_ERROR, COLOR_INFO, STRIPE_API_KEY, PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_API_BASE, GENRES, POOLS
+from utils.constants import COLOR_SUCCESS, COLOR_ERROR, COLOR_INFO, STRIPE_API_KEY, PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_API_BASE, GENRES, POOLS, WINNER_PAYOUT_PERCENT
 import stripe
+import asyncio
 import logging
 import aiohttp
 import base64
@@ -90,7 +91,6 @@ class BuyCoinsView(discord.ui.View):
         try:
             session = await asyncio.to_thread(
                 stripe.checkout.Session.create,
-                payment_method_types=['card'],
                 line_items=[{
                     'price_data': {
                         'currency': 'usd',
@@ -205,23 +205,58 @@ class Payments(commands.Cog):
                 else:
                     await channel.send(embed=stats_embed)
 
-    async def get_stats_embed(self, genre=None):
+    async def get_stats_embed(self, genre_filter=None):
         async with get_db() as db:
             cursor = await db.execute("SELECT genre, pool_type, total_amount, entrant_count FROM pool_totals")
             rows = await cursor.fetchall()
             
-            # Map existing data for quick lookup
+            # Map existing stats for quick lookup
             stats_map = {(r[0], r[1]): (r[2], r[3]) for r in rows}
             
-            embed = discord.Embed(title="Live Prize Pools", color=COLOR_INFO)
+            title = f"Live Prize Pools: {genre_filter}" if genre_filter else "Live Prize Pools"
+            embed = discord.Embed(title=title, color=COLOR_INFO)
             embed.set_footer(text="Join a pool by entering its channel and typing /enter")
             
-            for g in GENRES:
+            genres_to_show = [genre_filter] if genre_filter else GENRES
+            for g in genres_to_show:
                 category_stats = []
                 for p in POOLS:
                     total, count = stats_map.get((g, p), (0.0, 0))
-                    status = f"**${p} Pool**: `${total:.2f}` ({count} entrants)" if count > 0 else f"**${p} Pool**: No entrants"
-                    category_stats.append(status)
+                    winner_prize = total * WINNER_PAYOUT_PERCENT
+                    
+                    status = f"**${p} Pool**: `${total:.2f}` (Winner: `${winner_prize:.2f}`)"
+                    if count == 0:
+                        status += "\n*No entrants*"
+                    else:
+                        # Query for the top 3 leaders in this genre/pool
+                        leader_cursor = await db.execute(
+                            """
+                            SELECT u.username, COUNT(v.vote_id) as vote_count 
+                            FROM entrants e 
+                            JOIN users u ON e.user_id = u.user_id 
+                            LEFT JOIN votes v ON e.entrant_id = v.entrant_id 
+                            WHERE e.battle_id = (
+                                SELECT battle_id FROM battles 
+                                WHERE genre = ? AND pool_amount = ? AND status IN ('pending', 'active', 'voting') 
+                                ORDER BY created_at DESC LIMIT 1
+                            ) 
+                            AND e.payment_status = 'paid'
+                            AND e.disqualified = 0
+                            GROUP BY e.entrant_id 
+                            ORDER BY vote_count DESC, e.entrant_id ASC
+                            LIMIT 3
+                            """,
+                            (g, float(p))
+                        )
+                        leaders = await leader_cursor.fetchall()
+                        if leaders:
+                            leaderboard = []
+                            for i, (name, votes) in enumerate(leaders, 1):
+                                emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉"
+                                leaderboard.append(f"{emoji} {name} (`{votes}v`)")
+                            status += "\n" + "\n".join(leaderboard)
+                    
+                    category_stats.append(status + "\n")
                 
                 embed.add_field(
                     name=f"--- {g} ---",
@@ -230,7 +265,24 @@ class Payments(commands.Cog):
                 )
             return embed
 
+    @app_commands.command(name="pools")
+    @app_commands.choices(genre=[
+        app_commands.Choice(name=g, value=g) for g in GENRES
+    ])
+    async def pools(self, interaction: discord.Interaction, genre: str = None):
+        """Check the current prize money in each pool."""
+        # defer() is now handled globally in main.py
+        embed = await self.get_stats_embed(genre)
+        await interaction.followup.send(embed=embed)
+
     @app_commands.command(name="buy_coins")
+    @app_commands.choices(amount=[
+        app_commands.Choice(name="5 Coins ($5.00)", value=5),
+        app_commands.Choice(name="10 Coins ($10.00)", value=10),
+        app_commands.Choice(name="20 Coins ($20.00)", value=20),
+        app_commands.Choice(name="50 Coins ($50.00)", value=50),
+        app_commands.Choice(name="100 Coins ($100.00)", value=100)
+    ])
     async def buy_coins(self, interaction: discord.Interaction, amount: int):
         """Purchase battle coins (1 Coin = $1.00)."""
         # defer() is now handled globally in main.py

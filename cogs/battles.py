@@ -1,17 +1,23 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from utils.database import get_db
-from utils.constants import GENRES, POOLS, COLOR_SUCCESS, COLOR_ERROR, COLOR_INFO, CREATOR_ROLE_NAME
+from utils.constants import GENRES, POOLS, COLOR_SUCCESS, COLOR_ERROR, COLOR_INFO, CREATOR_ROLE_NAME, VOTING_DURATION_HOURS
 import asyncio
+from datetime import datetime, timedelta
 import logging
 import aiohttp
+import io
 
 logger = logging.getLogger('music_battles.battles')
 
 class Battles(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.daily_battle_start.start()
+
+    def cog_unload(self):
+        self.daily_battle_start.cancel()
 
     async def _call_with_retry(self, func, *args, **kwargs):
         """Helper to retry Discord API calls on transient 503 errors and connection issues."""
@@ -140,10 +146,11 @@ class Battles(commands.Cog):
                 cursor = await db.execute("INSERT INTO battles (genre, pool_amount, status) VALUES (?, ?, 'pending')", (genre, pool_amount))
                 battle_id = cursor.lastrowid
             
-            await db.execute(
+            entrant_cursor = await db.execute(
                 "INSERT INTO entrants (battle_id, user_id, track_link, payment_status) VALUES (?, ?, ?, 'paid')",
                 (battle_id, interaction.user.id, track_url)
             )
+            entrant_id = entrant_cursor.lastrowid
             
             await db.execute(
                 "INSERT INTO pool_totals (genre, pool_type, total_amount, entrant_count) VALUES (?, ?, ?, 1) "
@@ -160,7 +167,7 @@ class Battles(commands.Cog):
             description=f"You've entered the **{genre} ${pool_amount}** battle.\n**{required_coins}** coins have been deducted from your balance.",
             color=COLOR_SUCCESS
         )
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
         # Public announcement
         public_embed = discord.Embed(
@@ -169,7 +176,159 @@ class Battles(commands.Cog):
             color=COLOR_INFO
         )
         public_embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        await interaction.channel.send(embed=public_embed)
+        
+        announcement_msg = None
+        try:
+            # Send the track as an audio file instead of a link
+            file = await track.to_file()
+            announcement_msg = await interaction.channel.send(embed=public_embed, file=file)
+        except Exception as e:
+            logger.error(f"Failed to send public entry announcement: {e}")
+            # Fallback to link ONLY if file upload fails
+            public_embed.add_field(name="Track", value=f"[Listen Here]({track_url})", inline=False)
+            announcement_msg = await interaction.channel.send(embed=public_embed)
+
+        if announcement_msg:
+            try:
+                await announcement_msg.add_reaction("✅")
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE entrants SET announcement_message_id = ? WHERE entrant_id = ?",
+                        (announcement_msg.id, entrant_id)
+                    )
+                    await db.commit()
+            except Exception as e:
+                logger.error(f"Error finalising entry announcement: {e}")
+
+    @tasks.loop(hours=24)
+    async def daily_battle_start(self):
+        """Automatically start all pending battles that have enough entrants once a day."""
+        logger.info("Running daily automated battle start...")
+        async with get_db() as db:
+            cursor = await db.execute("SELECT battle_id FROM battles WHERE status = 'pending'")
+            battles = await cursor.fetchall()
+            
+            for (battle_id,) in battles:
+                # Check for each guild the bot is in (usually 1 for this type of bot)
+                for guild in self.bot.guilds:
+                    try:
+                        await self.start_battle_internal(guild, battle_id)
+                        logger.info(f"Automated start for Battle #{battle_id} in {guild.name}")
+                    except Exception as e:
+                        # Silently skip if battle doesn't belong to this guild or not enough entrants
+                        pass
+    
+    async def cleanup_pool_announcements(self, guild, genre, pool_amount, battle_id):
+        """Cleanup 'New Entry' announcements in the pool channel for a specific battle."""
+        category = discord.utils.get(guild.categories, name=genre)
+        if not category: return
+        
+        channel_name = f"{int(pool_amount)}-pool"
+        channel = discord.utils.get(category.text_channels, name=channel_name)
+        if not channel: return
+        
+        try:
+            # We look for bot messages that mention the battle ID or generic join messages
+            # In a real scenario, we'd check embed fields/titles for the battle ID if stored
+            # For now, we'll search the last 100 messages and delete bot messages that mention the user joined
+            async for message in channel.history(limit=100):
+                if message.author == self.bot.user and message.embeds:
+                    embed = message.embeds[0]
+                    if "has joined the" in (embed.description or "") and str(pool_amount) in (embed.description or ""):
+                        await message.delete()
+                        await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Error cleaning up pool announcements: {e}")
+
+    async def start_battle_internal(self, guild, battle_id):
+        """Logic to move a battle to voting phase. Shared by Admin command and Daily task."""
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT genre, pool_amount, status FROM battles WHERE battle_id = ?",
+                (battle_id,)
+            )
+            row = await cursor.fetchone()
+            if not row: return False, "Battle not found."
+            
+            genre, pool_amount, status = row
+            if status != 'pending': return False, f"Battle is already `{status}`."
+
+            cursor = await db.execute(
+                "SELECT e.entrant_id, u.username, e.track_link FROM entrants e JOIN users u ON e.user_id = u.user_id WHERE e.battle_id = ? AND e.payment_status = 'paid' AND e.disqualified = 0",
+                (battle_id,)
+            )
+            entrants = await cursor.fetchall()
+
+            if len(entrants) < 2:
+                return False, "At least 2 paid entrants are required to start a battle."
+
+            category_name = f"{genre} Battles"
+            category = discord.utils.get(guild.categories, name=category_name)
+            if not category:
+                category = await guild.create_category(category_name)
+
+            voting_channel = await guild.create_text_channel(
+                f"battle-{battle_id}-voting",
+                category=category
+            )
+
+            voting_ends_at = datetime.utcnow() + timedelta(hours=VOTING_DURATION_HOURS)
+            
+            await db.execute(
+                "UPDATE battles SET status = 'voting', voting_channel_id = ?, voting_ends_at = ? WHERE battle_id = ?",
+                (voting_channel.id, voting_ends_at.isoformat(), battle_id)
+            )
+            await db.commit()
+
+            header_embed = discord.Embed(
+                title=f"Voting Started: {genre}", 
+                description=(
+                    f"**Battle ID:** {battle_id}\n"
+                    f"**Prize Pool:** ${pool_amount}\n"
+                    f"**Voting Ends:** {VOTING_DURATION_HOURS} hours from now.\n\n"
+                    "React with ✅ to vote for your favorite tracks!"
+                ),
+                color=COLOR_INFO
+            )
+            await voting_channel.send(embed=header_embed)
+
+            for i, (entrant_id, username, track_link) in enumerate(entrants, 1):
+                submission_embed = discord.Embed(
+                    title=f"Submission #{i}",
+                    description=f"**Artist:** {username}",
+                    color=COLOR_SUCCESS
+                )
+                
+                # Fetch the track and send as an audio file for the player
+                file = None
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(track_link) as resp:
+                            if resp.status == 200:
+                                data = await resp.read()
+                                file = discord.File(io.BytesIO(data), filename=f"submission_{i}.mp3")
+                except Exception as e:
+                    logger.error(f"Failed to download track for voting: {e}")
+                    submission_embed.description += f"\n**Track:** [Listen Here]({track_link})"
+
+                try:
+                    msg = await voting_channel.send(embed=submission_embed, file=file)
+                except Exception as e:
+                    logger.error(f"Failed to send submission message: {e}")
+                    continue
+
+                try:
+                    await msg.add_reaction("✅")
+                except Exception as e:
+                    logger.error(f"Failed to add reaction to submission #{i}: {e}")
+                
+                await db.execute(
+                    "UPDATE entrants SET submission_message_id = ? WHERE entrant_id = ?",
+                    (msg.id, entrant_id)
+                )
+            
+            await db.commit()
+            return True, voting_channel
 
     @app_commands.command(name="battles")
     async def list_battles(self, interaction: discord.Interaction):
@@ -224,7 +383,16 @@ class Battles(commands.Cog):
                 await self._call_with_retry(battle_category.delete)
                 await asyncio.sleep(0.1)
 
-        embed.description = "All battle-related channels and categories have been deleted."
+        # Sync Database: Clear all battle-related data
+        async with get_db() as db:
+            await db.execute("DELETE FROM votes")
+            await db.execute("DELETE FROM entrants")
+            await db.execute("DELETE FROM battles")
+            await db.execute("DELETE FROM pool_totals")
+            await db.commit()
+            logger.info("Cleared all battle data from database during /delete_setup")
+
+        embed.description = "All battle-related channels, categories, and database records have been deleted."
         embed.color = COLOR_SUCCESS
         try:
             await status_msg.edit(embed=embed)
