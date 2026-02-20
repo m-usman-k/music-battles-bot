@@ -38,6 +38,7 @@ async def init_db():
                 submission_message_id INTEGER,
                 announcement_message_id INTEGER,
                 disqualified INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (battle_id) REFERENCES battles (battle_id),
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
@@ -46,6 +47,14 @@ async def init_db():
         # Migration: Add announcement_message_id if it doesn't exist
         try:
             await db.execute("ALTER TABLE entrants ADD COLUMN announcement_message_id INTEGER")
+            await db.commit()
+        except aiosqlite.OperationalError:
+            # Column already exists
+            pass
+            
+        # Migration: Add created_at to entrants if it doesn't exist
+        try:
+            await db.execute("ALTER TABLE entrants ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
             await db.commit()
         except aiosqlite.OperationalError:
             # Column already exists

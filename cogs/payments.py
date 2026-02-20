@@ -192,7 +192,7 @@ class Payments(commands.Cog):
                 data = await resp.json()
                 return data.get('status')
 
-    @tasks.loop(minutes=5)
+    @tasks.loop(minutes=1)
     async def update_live_stats(self):
         for guild in self.bot.guilds:
             channel = discord.utils.get(guild.text_channels, name="live-stats")
@@ -218,7 +218,7 @@ class Payments(commands.Cog):
             embed.set_footer(text="Join a pool by entering its channel and typing /enter")
             
             genres_to_show = [genre_filter] if genre_filter else GENRES
-            for g in genres_to_show:
+            for i, g in enumerate(genres_to_show):
                 category_stats = []
                 for p in POOLS:
                     total, count = stats_map.get((g, p), (0.0, 0))
@@ -251,8 +251,8 @@ class Payments(commands.Cog):
                         leaders = await leader_cursor.fetchall()
                         if leaders:
                             leaderboard = []
-                            for i, (name, votes) in enumerate(leaders, 1):
-                                emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉"
+                            for idx, (name, votes) in enumerate(leaders, 1):
+                                emoji = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉"
                                 leaderboard.append(f"{emoji} {name} (`{votes}v`)")
                             status += "\n" + "\n".join(leaderboard)
                     
@@ -263,6 +263,10 @@ class Payments(commands.Cog):
                     value="\n".join(category_stats),
                     inline=True
                 )
+                
+                # Add a blank field after every 2 genres to force a new row on desktop (3-column layout)
+                if not genre_filter and (i + 1) % 2 == 0:
+                    embed.add_field(name="\u200b", value="\u200b", inline=True)
             return embed
 
     @app_commands.command(name="pools")

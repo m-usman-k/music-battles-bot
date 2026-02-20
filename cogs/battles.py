@@ -124,6 +124,32 @@ class Battles(commands.Cog):
         track_url = track.url
 
         async with get_db() as db:
+            await db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (interaction.user.id, interaction.user.name))
+            
+            # Check for 24h restriction: 1 entry per genre/pool per 24h
+            check_cursor = await db.execute(
+                """
+                SELECT e.entrant_id 
+                FROM entrants e 
+                JOIN battles b ON e.battle_id = b.battle_id 
+                WHERE e.user_id = ? 
+                AND b.genre = ? 
+                AND b.pool_amount = ? 
+                AND e.created_at > datetime('now', '-24 hours')
+                LIMIT 1
+                """,
+                (interaction.user.id, genre, pool_amount)
+            )
+            existing_entry = await check_cursor.fetchone()
+            
+            if existing_entry:
+                embed = discord.Embed(
+                    title="Entry Restricted", 
+                    description=f"You have already entered the **{genre} ${pool_amount}** pool in the last 24 hours. Please wait before entering this pool again.", 
+                    color=COLOR_ERROR
+                )
+                return await interaction.followup.send(embed=embed)
+
             cursor = await db.execute("SELECT coins FROM users WHERE user_id = ?", (interaction.user.id,))
             row = await cursor.fetchone()
             user_coins = row[0] if row else 0
